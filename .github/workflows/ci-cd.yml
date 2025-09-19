@@ -1,0 +1,48 @@
+name: CI/CD to EC2
+
+on:
+  push:
+    branches: [develop, uat, main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set environment
+        id: set-env
+        run: |
+          if [[ "${{ github.ref_name }}" == "develop" ]]; then echo "env=dev" >> $GITHUB_OUTPUT; fi
+          if [[ "${{ github.ref_name }}" == "uat" ]]; then echo "env=uat" >> $GITHUB_OUTPUT; fi
+          if [[ "${{ github.ref_name }}" == "main" ]]; then echo "env=prod" >> $GITHUB_OUTPUT; fi
+
+      - name: Replace environment placeholder in index.html
+        run: |
+          sed -i "s/{{ENV}}/${{ steps.set-env.outputs.env }}/g" app/index.html
+
+      - name: Deploy to EC2
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+        run: |
+          echo "$DEPLOY_SSH_KEY" > deploy_key
+          chmod 600 deploy_key
+
+          # Fetch the public IP of the running EC2 instance based on environment
+          IP=$(aws ec2 describe-instances --filters "Name=tag:Name,Values=myapp-${{ steps.set-env.outputs.env }}" "Name=instance-state-name,Values=running" --query "Reservations[0].Instances[0].PublicIpAddress" --output text)
+          
+          # Ensure SSH directory exists and add the host key automatically
+          mkdir -p ~/.ssh
+          ssh-keyscan -t rsa $IP >> ~/.ssh/known_hosts
+
+          # Copy the updated index.html to the EC2 instance
+          scp -o StrictHostKeyChecking=no -i deploy_key app/index.html ubuntu@$IP:/tmp/index.html
+          
+          # SSH into the EC2 instance to move the file to the correct directory and restart apache2
+          ssh -o StrictHostKeyChecking=no -i deploy_key ubuntu@$IP "sudo mv /tmp/index.html /var/www/html/index.html && sudo systemctl restart apache2"
